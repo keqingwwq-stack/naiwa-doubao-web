@@ -1,11 +1,13 @@
-/* 手机端：强制横屏按钮（全屏 + orientation.lock）+ 一次性提示。
-   v4：单个「横屏」按钮，点一次强制横屏并全屏，再点一次还原；
-   失败时给出明确文案，不再假装成功。 */
+/* 手机端强制横屏 v5
+   - 优先：全屏 + screen.orientation.lock('landscape')（安卓 Chrome 等）
+   - 不支持时：CSS 旋转画布 90°，并把触摸/鼠标坐标重映射后转发给画布
+   - 右下角常驻「横屏 / 还原」按钮，点两次可来回切换 */
 (function () {
   "use strict";
 
   var forceShow = /[?&]rotate=1/.test(location.search);
-  var locked = false;
+  var rotated = false;   // 当前是否处于 CSS 旋转兜底模式
+  var locked = false;    // 当前是否成功锁了系统方向
   var busy = false;
 
   function isPhone() {
@@ -37,14 +39,16 @@
     try { window.dispatchEvent(new Event("resize")); } catch (e) {}
   }
 
+  function canvasEl() { return document.getElementById("canvas"); }
+
   var btn = null, hint = null, toastEl = null, hintShown = false, toastTimer = null;
 
   function injectStyle() {
-    var style = document.createElement("style");
-    style.textContent =
+    var s = document.createElement("style");
+    s.textContent =
       "#rpyFs{position:fixed;right:calc(10px + env(safe-area-inset-right,0px));" +
       "bottom:calc(10px + env(safe-area-inset-bottom,0px));z-index:2147483000;display:none;" +
-      "align-items:center;justify-content:center;min-width:44px;height:40px;padding:0 12px;border-radius:10px;" +
+      "align-items:center;justify-content:center;min-width:52px;height:40px;padding:0 12px;border-radius:10px;" +
       "box-sizing:border-box;background:rgba(12,16,22,.66);border:1px solid rgba(217,180,94,.6);color:#d9b45e;" +
       "font-family:'Microsoft YaHei UI','PingFang SC',sans-serif;font-size:12px;line-height:1;letter-spacing:.5px;" +
       "-webkit-user-select:none;user-select:none;touch-action:manipulation;box-shadow:0 4px 14px rgba(0,0,0,.4)}" +
@@ -56,13 +60,19 @@
       "border:1px solid rgba(217,180,94,.5);color:#e8e2d4;font-size:13px;white-space:nowrap;" +
       "font-family:'Microsoft YaHei UI','PingFang SC',sans-serif;pointer-events:none;opacity:0;transition:opacity .4s}" +
       "#rpyHint.show{display:block;opacity:1}" +
-      "#rpyToast{position:fixed;left:50%;top:14%;transform:translateX(-50%);z-index:2147483001;display:none;" +
+      "#rpyToast{position:fixed;left:50%;top:12%;transform:translateX(-50%);z-index:2147483001;display:none;" +
       "max-width:calc(100vw - 40px);padding:10px 16px;border-radius:10px;box-sizing:border-box;" +
       "background:rgba(20,26,34,.96);border:1px solid rgba(255,255,255,.18);color:#f2efe6;font-size:13px;" +
       "line-height:1.5;text-align:center;font-family:'Microsoft YaHei UI','PingFang SC',sans-serif;" +
       "box-shadow:0 8px 26px rgba(0,0,0,.5);pointer-events:none}" +
-      "#rpyToast.show{display:block}";
-    document.head.appendChild(style);
+      "#rpyToast.show{display:block}" +
+      "html.rpy-rot,html.rpy-rot body{overflow:hidden!important;height:100%!important;background:#000!important}" +
+      "html.rpy-rot #presplash{display:none!important}" +
+      "html.rpy-rot #canvas{position:fixed!important;left:50%!important;top:50%!important;" +
+      "width:100vh!important;height:100vw!important;max-width:none!important;max-height:none!important;" +
+      "transform:translate(-50%,-50%) rotate(90deg)!important;transform-origin:center center!important;" +
+      "margin:0!important;z-index:1}";
+    document.head.appendChild(s);
   }
 
   function toast(msg, ms) {
@@ -79,8 +89,124 @@
 
   function setBtn() {
     if (!btn) return;
-    btn.textContent = locked ? "还原" : "横屏";
+    btn.textContent = (rotated || locked) ? "还原" : "横屏";
   }
+
+  /* ---------- CSS 旋转兜底：输入重映射 ---------- */
+
+  function mapPoint(x, y) {
+    var W = window.innerWidth, H = window.innerHeight;
+    // 画布 CSS 尺寸为 (H, W)，绕中心顺时针旋转 90°：
+    // 视觉点 (x,y) 对应画布内坐标 (H - y, x)
+    return { cx: H - y, cy: x, W: W, H: H };
+  }
+
+  function remapTouchList(list, c, rect) {
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i];
+      var p = mapPoint(t.clientX, t.clientY);
+      var clientX = rect.left + p.cx * (rect.width / c.width);
+      var clientY = rect.top + p.cy * (rect.height / c.height);
+      try {
+        out.push(new Touch({
+          identifier: t.identifier,
+          target: c,
+          clientX: clientX,
+          clientY: clientY,
+          pageX: clientX + window.scrollX,
+          pageY: clientY + window.scrollY,
+          screenX: t.screenX,
+          screenY: t.screenY,
+          radiusX: t.radiusX || 1,
+          radiusY: t.radiusY || 1,
+          rotationAngle: 0,
+          force: t.force || 1
+        }));
+      } catch (e) {
+        return null;
+      }
+    }
+    return out;
+  }
+
+  function makeTouchHandler(type) {
+    return function (ev) {
+      if (!rotated) return;
+      if (btn && (ev.target === btn || (btn.contains && btn.contains(ev.target)))) return;
+      var c = canvasEl();
+      if (!c) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      var rect = c.getBoundingClientRect();
+      var touches = remapTouchList(ev.touches || [], c, rect);
+      var changed = remapTouchList(ev.changedTouches || [], c, rect);
+      if (!touches || !changed) return;
+      var synth;
+      try {
+        synth = new TouchEvent(type, {
+          bubbles: true, cancelable: true,
+          touches: touches, targetTouches: touches, changedTouches: changed
+        });
+      } catch (e) {
+        return;
+      }
+      c.dispatchEvent(synth);
+    };
+  }
+
+  function makeMouseHandler(type) {
+    return function (ev) {
+      if (!rotated) return;
+      if (btn && (ev.target === btn || (btn.contains && btn.contains(ev.target)))) return;
+      var c = canvasEl();
+      if (!c) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      var rect = c.getBoundingClientRect();
+      var p = mapPoint(ev.clientX, ev.clientY);
+      var clientX = rect.left + p.cx * (rect.width / c.width);
+      var clientY = rect.top + p.cy * (rect.height / c.height);
+      var synth = new MouseEvent(type, {
+        bubbles: true, cancelable: true,
+        clientX: clientX, clientY: clientY,
+        screenX: ev.screenX, screenY: ev.screenY,
+        button: ev.button, buttons: ev.buttons
+      });
+      c.dispatchEvent(synth);
+    };
+  }
+
+  var touchTypes = ["touchstart", "touchmove", "touchend", "touchcancel"];
+  var mouseTypes = ["mousedown", "mousemove", "mouseup"];
+
+  function bindRemap(on) {
+    var method = on ? "addEventListener" : "removeEventListener";
+    touchTypes.forEach(function (t) {
+      window[method](t, makeTouchHandler(t), { capture: true, passive: false });
+    });
+    mouseTypes.forEach(function (t) {
+      window[method](t, makeMouseHandler(t), true);
+    });
+  }
+
+  function enableCssRotate() {
+    document.documentElement.classList.add("rpy-rot");
+    rotated = true;
+    bindRemap(true);
+    setBtn();
+    setTimeout(nudgeResize, 300);
+  }
+
+  function disableCssRotate() {
+    document.documentElement.classList.remove("rpy-rot");
+    if (rotated) bindRemap(false);
+    rotated = false;
+    setBtn();
+    setTimeout(nudgeResize, 300);
+  }
+
+  /* ---------- 主流程 ---------- */
 
   function tryLock() {
     if (!(screen.orientation && screen.orientation.lock)) return Promise.reject(new Error("no-lock-api"));
@@ -91,42 +217,45 @@
     if (busy) return;
     busy = true;
     var el = document.documentElement;
-    var fs = fsElement();
-    var goLock = function () {
-      tryLock().then(function () {
-        locked = true;
-        setBtn();
-        toast("已横屏。点右下角「还原」可以退出", 3000);
-      }).catch(function (err) {
+    var afterLockFail = function () {
+      // 系统不允许锁方向：若手机本身已经是横屏就什么都不用做，否则用 CSS 旋转兜底
+      if (!isPortrait()) {
         locked = false;
-        setBtn();
-        var name = (err && (err.name || err.message)) || "unknown";
-        if (name === "no-lock-api") {
-          toast("这个浏览器不支持强制横屏。请打开手机的「自动旋转」，再把手机横过来", 6000);
-        } else {
-          toast("强制横屏被系统拒绝了（" + name + "）。请打开手机「自动旋转」后把手机横过来", 6000);
-        }
-      }).then(function () {
         busy = false;
-        setTimeout(nudgeResize, 400);
-      });
+        toast("已经是横屏了", 2000);
+        return;
+      }
+      enableCssRotate();
+      locked = false;
+      busy = false;
+      toast("已用旋转模式横屏显示（部分浏览器不支持真正锁屏）。点「还原」可退出", 5000);
     };
 
-    if (fs) { goLock(); return; }
+    if (!fsElement()) {
+      var req = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (req) {
+        try {
+          var p = req.call(el);
+          if (p && p.then) { p.then(function () {}).catch(function () {}); }
+        } catch (e) {}
+      }
+    }
 
-    var req = el.requestFullscreen || el.webkitRequestFullscreen;
-    if (!req) {
-      // 没有全屏 API（如微信内置浏览器）：直接试锁方向
-      goLock();
-      return;
-    }
-    try {
-      var p = req.call(el);
-      if (p && p.then) p.then(goLock).catch(function () { goLock(); });
-      else goLock();
-    } catch (e) {
-      goLock();
-    }
+    tryLock().then(function () {
+      locked = true;
+      rotated = false;
+      setBtn();
+      busy = false;
+      toast("已横屏", 2500);
+      setTimeout(nudgeResize, 400);
+    }).catch(function (err) {
+      var name = (err && (err.name || err.message)) || "unknown";
+      if (name === "NotSupportedError" || name === "no-lock-api" || name === "NotAllowedError") {
+        afterLockFail();
+      } else {
+        afterLockFail();
+      }
+    });
   }
 
   function exitLandscape() {
@@ -134,13 +263,13 @@
     busy = true;
     try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (e) {}
     locked = false;
-    setBtn();
+    disableCssRotate();
     if (fsElement()) {
       var ex = document.exitFullscreen || document.webkitExitFullscreen;
       if (ex) { try { ex.call(document); } catch (e) {} }
     }
     setTimeout(function () { busy = false; nudgeResize(); }, 400);
-    toast("已还原", 2000);
+    toast("已还原", 1800);
   }
 
   function build() {
@@ -149,25 +278,27 @@
     btn = document.createElement("button");
     btn.id = "rpyFs";
     btn.type = "button";
-    btn.setAttribute("aria-label", "强制横屏");
+    btn.setAttribute("aria-label", "横屏");
     btn.textContent = "横屏";
     document.body.appendChild(btn);
 
     hint = document.createElement("div");
     hint.id = "rpyHint";
-    hint.textContent = "点右下角「横屏」可强制横屏";
+    hint.textContent = "点右下角「横屏」可以强制横屏";
     document.body.appendChild(hint);
 
     btn.addEventListener("click", function (e) {
       e.preventDefault();
       e.stopPropagation();
-      if (locked) exitLandscape();
+      if (rotated || locked) exitLandscape();
       else enterLandscape();
     });
 
     function layout() {
       if (forceShow || isPhone()) btn.classList.add("show");
       else btn.classList.remove("show");
+      // 手机自己转成横屏后，不再需要 CSS 旋转兜底
+      if (rotated && !isPortrait() && !busy) disableCssRotate();
       if ((forceShow || isPhone()) && isPortrait() && !hintShown) {
         hintShown = true;
         hint.classList.add("show");
@@ -180,14 +311,6 @@
     window.addEventListener("orientationchange", function () {
       setTimeout(function () { layout(); nudgeResize(); }, 300);
     });
-    if (screen.orientation && screen.orientation.addEventListener) {
-      screen.orientation.addEventListener("change", function () {
-        // 方向变化后同步按钮状态
-        locked = !isPortrait();
-        setBtn();
-        setTimeout(nudgeResize, 300);
-      });
-    }
     document.addEventListener("fullscreenchange", function () { setTimeout(nudgeResize, 350); });
   }
 
