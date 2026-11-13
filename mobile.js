@@ -1,10 +1,8 @@
-/* 手机横屏提示（v2）：只在竖屏时弹一条不挡游戏的小横条，可关闭、可全屏。 */
+/* 手机端：常驻全屏小按钮 + 一次性横屏提示（v3，不锁方向、不遮游戏、不做状态记忆） */
 (function () {
   "use strict";
 
   var forceShow = /[?&]rotate=1/.test(location.search);
-  var DISMISS_KEY = "rpyRotateDismissedAt";
-  var DISMISS_MS = 12 * 60 * 60 * 1000; // 关掉后 12 小时内不再弹
 
   function isPhone() {
     var ua = navigator.userAgent || "";
@@ -18,103 +16,98 @@
 
   function isPortrait() {
     try {
-      if (window.matchMedia && window.matchMedia("(orientation: portrait)").matches) return true;
-      if (window.matchMedia && window.matchMedia("(orientation: landscape)").matches) return false;
+      if (window.matchMedia) {
+        if (window.matchMedia("(orientation: portrait)").matches) return true;
+        if (window.matchMedia("(orientation: landscape)").matches) return false;
+      }
     } catch (e) {}
-    var w = window.innerWidth || document.documentElement.clientWidth || 0;
-    var h = window.innerHeight || document.documentElement.clientHeight || 0;
-    return h > w;
+    var w = window.innerWidth || 0, h = window.innerHeight || 0;
+    return h >= w;
   }
 
-  function dismissedRecently() {
-    try {
-      var t = parseInt(localStorage.getItem(DISMISS_KEY) || "0", 10);
-      return t > 0 && (Date.now() - t) < DISMISS_MS;
-    } catch (e) {
-      return false;
-    }
+  function fsElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement || null;
   }
 
-  var bar = null, hideTimer = null;
+  function nudgeResize() {
+    try { window.dispatchEvent(new Event("resize")); } catch (e) {}
+  }
+
+  var btn = null, hint = null, hintShown = false;
 
   function build() {
     var style = document.createElement("style");
     style.textContent =
-      "#rpyHint{position:fixed;left:50%;bottom:calc(12px + env(safe-area-inset-bottom,0px));" +
-      "transform:translateX(-50%);z-index:2147483000;display:none;align-items:center;gap:10px;" +
-      "max-width:calc(100vw - 24px);padding:9px 10px 9px 14px;border-radius:999px;box-sizing:border-box;" +
-      "background:rgba(12,16,22,.92);border:1px solid rgba(217,180,94,.55);box-shadow:0 6px 22px rgba(0,0,0,.45);" +
-      "font-family:'Microsoft YaHei UI','PingFang SC','Noto Sans CJK SC',sans-serif;color:#e8e2d4;" +
+      "#rpyFs{position:fixed;right:calc(10px + env(safe-area-inset-right,0px));" +
+      "bottom:calc(10px + env(safe-area-inset-bottom,0px));z-index:2147483000;display:none;" +
+      "align-items:center;justify-content:center;width:38px;height:38px;border-radius:10px;box-sizing:border-box;" +
+      "background:rgba(12,16,22,.62);border:1px solid rgba(217,180,94,.55);color:#d9b45e;" +
+      "font-family:'Microsoft YaHei UI','PingFang SC',sans-serif;font-size:11px;line-height:1;" +
       "-webkit-user-select:none;user-select:none;touch-action:manipulation}" +
-      "#rpyHint.show{display:flex}" +
-      "#rpyHint .txt{font-size:13px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
-      "#rpyHint .go{flex:0 0 auto;font:inherit;font-size:13px;padding:6px 14px;border-radius:999px;" +
-      "border:1px solid #d9b45e;background:rgba(217,180,94,.14);color:#d9b45e}" +
-      "#rpyHint .go:active{background:rgba(217,180,94,.3)}" +
-      "#rpyHint .x{flex:0 0 auto;width:26px;height:26px;line-height:24px;text-align:center;border-radius:50%;" +
-      "border:0;background:transparent;color:#8b98a5;font-size:17px;padding:0}" +
-      "#rpyHint .x:active{color:#e8e2d4}";
+      "#rpyFs.show{display:flex}" +
+      "#rpyFs:active{background:rgba(217,180,94,.25)}" +
+      "#rpyHint{position:fixed;left:50%;bottom:calc(58px + env(safe-area-inset-bottom,0px));" +
+      "transform:translateX(-50%);z-index:2147483000;display:none;max-width:calc(100vw - 28px);" +
+      "padding:8px 14px;border-radius:999px;box-sizing:border-box;background:rgba(12,16,22,.9);" +
+      "border:1px solid rgba(217,180,94,.5);color:#e8e2d4;font-size:13px;white-space:nowrap;" +
+      "font-family:'Microsoft YaHei UI','PingFang SC',sans-serif;pointer-events:none;" +
+      "transition:opacity .4s;opacity:0}" +
+      "#rpyHint.show{display:block;opacity:1}";
     document.head.appendChild(style);
 
-    bar = document.createElement("div");
-    bar.id = "rpyHint";
-    bar.innerHTML =
-      '<span class="txt">手机横过来玩，画面更大</span>' +
-      '<button class="go" type="button">全屏横屏</button>' +
-      '<button class="x" type="button" aria-label="关闭">×</button>';
-    document.body.appendChild(bar);
+    btn = document.createElement("button");
+    btn.id = "rpyFs";
+    btn.type = "button";
+    btn.setAttribute("aria-label", "全屏");
+    btn.textContent = "全屏";
+    document.body.appendChild(btn);
 
-    bar.querySelector(".go").addEventListener("click", function () {
-      var el = document.documentElement;
-      var req = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
-      var locked = false;
-      function after() {
-        if (!locked && screen.orientation && screen.orientation.lock) {
-          locked = true;
-          try { screen.orientation.lock("landscape").catch(function () {}); } catch (e) {}
-        }
-        setTimeout(update, 400);
+    hint = document.createElement("div");
+    hint.id = "rpyHint";
+    hint.textContent = "把手机横过来玩，画面更大";
+    document.body.appendChild(hint);
+
+    btn.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (fsElement()) {
+        var ex = document.exitFullscreen || document.webkitExitFullscreen;
+        if (ex) { try { ex.call(document); } catch (err) {} }
+        setTimeout(nudgeResize, 400);
+        return;
       }
-      if (req) {
-        try {
-          var p = req.call(el);
-          if (p && p.then) p.then(after).catch(after);
-          else after();
-        } catch (e) { after(); }
-      } else { after(); }
+      var el = document.documentElement;
+      var req = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (!req) { btn.classList.remove("show"); return; }
+      try {
+        var p = req.call(el);
+        if (p && p.then) { p.then(function () { setTimeout(nudgeResize, 400); }).catch(function () {}); }
+        else { setTimeout(nudgeResize, 400); }
+      } catch (err) {}
     });
 
-    bar.querySelector(".x").addEventListener("click", function () {
-      try { localStorage.setItem(DISMISS_KEY, String(Date.now())); } catch (e) {}
-      bar.classList.remove("show");
-    });
-  }
-
-  function update() {
-    if (!bar) return;
-    var show;
-    if (forceShow) show = true;
-    else show = isPhone() && isPortrait() && !dismissedRecently();
-    if (show) {
-      bar.classList.add("show");
-      if (hideTimer) clearTimeout(hideTimer);
-      hideTimer = setTimeout(function () { bar.classList.remove("show"); }, 12000);
-    } else {
-      bar.classList.remove("show");
+    function layout() {
+      if (forceShow || isPhone()) btn.classList.add("show");
+      else btn.classList.remove("show");
+      if ((forceShow || isPhone()) && isPortrait() && !hintShown) {
+        hintShown = true;
+        hint.classList.add("show");
+        setTimeout(function () { hint.classList.remove("show"); }, 6000);
+      }
     }
-  }
 
-  function start() {
-    build();
-    update();
-    window.addEventListener("resize", update);
-    window.addEventListener("orientationchange", function () { setTimeout(update, 250); });
+    layout();
+    // 注意：这里不能调用 nudgeResize()，否则会 dispatch resize 造成无限递归
+    window.addEventListener("resize", layout);
+    window.addEventListener("orientationchange", function () {
+      setTimeout(function () { layout(); nudgeResize(); }, 300);
+    });
     if (screen.orientation && screen.orientation.addEventListener) {
-      screen.orientation.addEventListener("change", function () { setTimeout(update, 250); });
+      screen.orientation.addEventListener("change", function () { setTimeout(nudgeResize, 300); });
     }
-    document.addEventListener("fullscreenchange", function () { setTimeout(update, 300); });
+    document.addEventListener("fullscreenchange", function () { setTimeout(nudgeResize, 350); });
   }
 
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
-  else start();
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", build);
+  else build();
 })();
