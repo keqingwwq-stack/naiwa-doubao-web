@@ -1,14 +1,30 @@
 《奶娃与豆包》网页版（Ren'Py 8.5.3 Web 构建）
 =================================================
 
+★ 在线地址（都已上线，长期有效，直接发人就行）
+
+  推荐（短、不带账号名）：
+      https://naiwa-doubao.netlify.app
+
+  备用（GitHub Pages，同样的内容）：
+      https://keqingwwq-stack.github.io/naiwa-doubao-web/
+      源码仓库：https://github.com/keqingwwq-stack/naiwa-doubao-web
+
+  * 电脑关机、断网都不影响别人打开。
+  * 两个地址内容一致：Netlify 是手动上传本文件夹的 zip；GitHub 是仓库自动发布。
+  * 改内容后要两边都更新：
+      - GitHub：把新文件覆盖进仓库根目录，push 到 main，约 1 分钟生效；
+      - Netlify：项目 → Deploys → 把新的 zip 拖进去（或 browse files）。
+
 一、目录里是什么
   index.html          网页入口（必须是它作为首页）
+  mobile.js           手机竖屏时提示横屏 + 一键全屏横屏（只影响竖屏手机）
   game.zip  +  game/  游戏本体（剧情、图片、音频），game/ 里的资源按需加载
   renpy.*             Ren'Py 网页引擎（wasm / js / data）
-  icons/ manifest.json service-worker.js   PWA（可以“添加到桌面”）
+  icons/ manifest.json service-worker.js   PWA（可以“添加到桌面”，已声明横屏全屏启动）
   serve.py 启动网页版.bat                  本机试玩用的小服务器
 
-  整个目录 79 个文件，约 90.7 MB。
+  整个目录 81 个文件，约 90.8 MB（压缩后 62.4 MB）。
 
 二、本机试玩（不用装任何东西，除了 Python）
   1) 双击「启动网页版.bat」（需要已安装 Python 3；没装会提示）
@@ -20,35 +36,40 @@
   注意：不能直接双击 index.html 用 file:// 打开，浏览器会拦截，
         必须走 http（上面的 bat 就是干这个的）。
 
-三、发布到公网（让任何人点链接就能玩）
+三、换别的地方发布（让任何人点链接就能玩）
   把这个文件夹里的所有文件原样上传到任意静态空间即可，入口是 index.html。
   已验证：不需要后端、不需要特殊响应头（不需要 COOP/COEP），普通静态服务器就能跑。
 
+  重要：打 zip 上传时，压缩包内路径必须用 / 分隔（game/images/...），
+        不能用 Windows 的反斜杠，否则那一整层目录在服务器上会 404。
+        现在桌面的 zip 已经是 / 分隔的正确包，可以直接拖给任何平台。
+
   可选平台：
+   * Netlify       把 zip 拖进 app.netlify.com/drop，登录后认领即长期有效（当前用的就是它）
    * GitHub Pages  把文件推到仓库 → Settings → Pages → 选分支根目录
-   * Netlify / Vercel  直接把本文件夹拖进网页即可
    * itch.io       新建 HTML 项目，上传 zip，勾选 “This file will be played in the browser”
    * 自己的服务器 / 宝塔 / 阿里云 OSS / 腾讯云 COS  当普通静态站点放上去
    * Cloudflare Pages 同上
 
-  打包上传用的 zip：桌面上的「奶娃与豆包-网页版.zip」，
-  解压后请确认 index.html 位于站点根目录（不要多套一层文件夹）。
+四、手机上玩（横屏优化）
+  * 用手机浏览器打开第一节的链接即可，不需要装 App。
+  * 竖屏时会自动盖一层「请把手机横过来」的提示，点一下「全屏横屏开始」
+    就会进入全屏并尝试锁定横屏；手机转成横屏后提示自动消失。
+  * 想更接近原生 App：浏览器菜单里选「添加到主屏幕 / 添加到桌面」，
+    之后从桌面图标进入会以横屏全屏模式启动（manifest 里已声明 landscape-primary）。
+  * 桌面电脑打开不受影响，不会出现这个提示。
+  * 提示页是纯前端实现的（mobile.js），只影响竖屏手机，不改游戏本身。
 
-四、已知说明
+五、已知说明
   * 首次打开要下载约 37 MB 引擎数据（renpy.wasm/renpy.data/game.zip），
     视网速需要几秒到几十秒，页面会显示 “Unpacking...” 进度。
   * 存档保存在浏览器本地（IndexedDB）。换浏览器、换设备、清理站点数据会丢档。
   * 手机竖屏也能玩，横屏体验更好。
 
-五、不想注册任何账号，只想现在就把链接发给别人
-  双击「分享链接.bat」：
-    1) 它会在本机起一个静态服务器；
-    2) 再通过 Cloudflare 免费隧道（不需要注册）给你一个公网地址，
-       形如 https://xxxx-xxxx.trycloudflare.com ；
-    3) 把这个地址发给任何人，对方用浏览器/手机直接打开就能玩。
-  限制：这个地址绑在你自己的电脑上 —— 电脑关机、睡眠、断网，或者关掉那个
-        黑窗口，链接就失效；下次再运行会得到一个新地址。
-        别人下载速度也取决于你机器的上行带宽。
-  想长期稳定给别人玩，还是用第三节那种"上传到静态空间"的方式。
+六、关于早期的“本机隧道分享”（已下线）
+  之前用过 Cloudflare 临时隧道（https://xxxx.trycloudflare.com）把本机服务映射成
+  公网地址，那种方式绑在这台电脑上，关机即失效、每次地址还会变，现已停止，
+  相关脚本（分享链接.bat）和 cloudflared.exe 也已删除。
+  以后统一只用第一节的两个地址。
 
 构建信息：Ren'Py 8.5.3.26051504，构建时间 2026-11-13。
