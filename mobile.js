@@ -117,22 +117,43 @@
       "办法三：换 Chrome / Edge / 夸克 打开本页，再点「横屏」。";
   }
 
+  function ensureFullscreen() {
+    if (fsElement()) return Promise.resolve(true);
+    var el = document.documentElement;
+    var req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (!req) return Promise.resolve(false);
+    return new Promise(function (resolve) {
+      var settled = false;
+      function finish(ok) {
+        if (settled) return;
+        settled = true;
+        document.removeEventListener("fullscreenchange", onChange);
+        document.removeEventListener("webkitfullscreenchange", onChange);
+        resolve(ok);
+      }
+      function onChange() { if (fsElement()) finish(true); }
+      document.addEventListener("fullscreenchange", onChange);
+      document.addEventListener("webkitfullscreenchange", onChange);
+      try {
+        var p = req.call(el);
+        if (p && p.then) p.catch(function () { finish(false); });
+      } catch (e) {
+        finish(false);
+      }
+      setTimeout(function () { finish(!!fsElement()); }, 1200);
+    });
+  }
+
   function enterLandscape() {
     if (busy) return;
     busy = true;
 
-    var el = document.documentElement;
-    if (!fsElement()) {
-      var req = el.requestFullscreen || el.webkitRequestFullscreen;
-      if (req) {
-        try {
-          var p = req.call(el);
-          if (p && p.catch) p.catch(function () {});
-        } catch (e) {}
-      }
-    }
-
-    tryLock().then(function () {
+    // Chrome/Edge 只有在真正进入全屏之后才允许 lock，所以必须先等全屏生效
+    ensureFullscreen().then(function () {
+      return new Promise(function (r) { setTimeout(r, 180); });
+    }).then(function () {
+      return tryLock();
+    }).then(function () {
       locked = true;
       setFsLabel();
       busy = false;
