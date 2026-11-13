@@ -1,115 +1,120 @@
-/* 手机横屏支持：竖屏时提示旋转，可一键全屏并锁定横屏。桌面浏览器不受影响。 */
+/* 手机横屏提示（v2）：只在竖屏时弹一条不挡游戏的小横条，可关闭、可全屏。 */
 (function () {
   "use strict";
 
   var forceShow = /[?&]rotate=1/.test(location.search);
+  var DISMISS_KEY = "rpyRotateDismissedAt";
+  var DISMISS_MS = 12 * 60 * 60 * 1000; // 关掉后 12 小时内不再弹
 
   function isPhone() {
     var ua = navigator.userAgent || "";
     if (/Android|iPhone|iPod|Windows Phone|Mobile|HarmonyOS|OpenHarmony/i.test(ua)) return true;
-    // 平板/触屏设备：短边小于 820px 视为手机
-    if (navigator.maxTouchPoints > 1 && screen && screen.width && screen.height) {
-      return Math.min(screen.width, screen.height) < 820;
+    if (navigator.maxTouchPoints > 1) {
+      var w = Math.min(screen.width || 9999, screen.height || 9999);
+      if (w < 820) return true;
     }
     return false;
   }
 
   function isPortrait() {
-    if (screen.orientation && typeof screen.orientation.type === "string") {
-      return screen.orientation.type.indexOf("portrait") === 0;
-    }
-    return window.innerHeight >= window.innerWidth;
+    try {
+      if (window.matchMedia && window.matchMedia("(orientation: portrait)").matches) return true;
+      if (window.matchMedia && window.matchMedia("(orientation: landscape)").matches) return false;
+    } catch (e) {}
+    var w = window.innerWidth || document.documentElement.clientWidth || 0;
+    var h = window.innerHeight || document.documentElement.clientHeight || 0;
+    return h > w;
   }
 
-  var mask = null;
+  function dismissedRecently() {
+    try {
+      var t = parseInt(localStorage.getItem(DISMISS_KEY) || "0", 10);
+      return t > 0 && (Date.now() - t) < DISMISS_MS;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  var bar = null, hideTimer = null;
 
   function build() {
     var style = document.createElement("style");
     style.textContent =
-      "#rpyRotate{position:fixed;inset:0;z-index:2147483000;display:none;" +
-      "background:radial-gradient(120% 120% at 50% 0%,#16202b 0%,#080b0f 70%);" +
-      "color:#e8e2d4;font-family:'Microsoft YaHei UI','PingFang SC','Noto Sans CJK SC',sans-serif;" +
-      "align-items:center;justify-content:center;flex-direction:column;text-align:center;" +
-      "padding:24px;box-sizing:border-box;-webkit-user-select:none;user-select:none;touch-action:manipulation}" +
-      "#rpyRotate.show{display:flex}" +
-      "#rpyRotate .ico{width:96px;height:96px;margin-bottom:18px;animation:rpySpin 2.6s ease-in-out infinite}" +
-      "#rpyRotate h1{font-size:22px;font-weight:600;margin:0 0 10px;color:#d9b45e;letter-spacing:.06em}" +
-      "#rpyRotate p{font-size:14px;line-height:1.7;margin:0 0 22px;color:#9fb0bf;max-width:22em}" +
-      "#rpyRotate button{font:inherit;font-size:15px;padding:12px 26px;border-radius:999px;border:1px solid #d9b45e;" +
-      "background:transparent;color:#d9b45e;letter-spacing:.08em}" +
-      "#rpyRotate button:active{background:rgba(217,180,94,.16)}" +
-      "#rpyRotate .tip{margin-top:16px;font-size:12px;color:#5d6b78}" +
-      "@keyframes rpySpin{0%,45%{transform:rotate(0)}55%,100%{transform:rotate(90deg)}}";
+      "#rpyHint{position:fixed;left:50%;bottom:calc(12px + env(safe-area-inset-bottom,0px));" +
+      "transform:translateX(-50%);z-index:2147483000;display:none;align-items:center;gap:10px;" +
+      "max-width:calc(100vw - 24px);padding:9px 10px 9px 14px;border-radius:999px;box-sizing:border-box;" +
+      "background:rgba(12,16,22,.92);border:1px solid rgba(217,180,94,.55);box-shadow:0 6px 22px rgba(0,0,0,.45);" +
+      "font-family:'Microsoft YaHei UI','PingFang SC','Noto Sans CJK SC',sans-serif;color:#e8e2d4;" +
+      "-webkit-user-select:none;user-select:none;touch-action:manipulation}" +
+      "#rpyHint.show{display:flex}" +
+      "#rpyHint .txt{font-size:13px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
+      "#rpyHint .go{flex:0 0 auto;font:inherit;font-size:13px;padding:6px 14px;border-radius:999px;" +
+      "border:1px solid #d9b45e;background:rgba(217,180,94,.14);color:#d9b45e}" +
+      "#rpyHint .go:active{background:rgba(217,180,94,.3)}" +
+      "#rpyHint .x{flex:0 0 auto;width:26px;height:26px;line-height:24px;text-align:center;border-radius:50%;" +
+      "border:0;background:transparent;color:#8b98a5;font-size:17px;padding:0}" +
+      "#rpyHint .x:active{color:#e8e2d4}";
     document.head.appendChild(style);
 
-    mask = document.createElement("div");
-    mask.id = "rpyRotate";
-    mask.innerHTML =
-      '<svg class="ico" viewBox="0 0 100 100" aria-hidden="true">' +
-      '<rect x="28" y="10" width="44" height="80" rx="8" fill="none" stroke="#d9b45e" stroke-width="4"/>' +
-      '<rect x="42" y="78" width="16" height="3.5" rx="1.8" fill="#d9b45e"/>' +
-      "</svg>" +
-      "<h1>请把手机横过来</h1>" +
-      "<p>这个游戏是横屏的，转一下手机就能全屏开玩。</p>" +
-      '<button id="rpyRotateBtn" type="button">全屏横屏开始</button>' +
-      '<div class="tip">转屏后若画面没有变大，点一下上面的按钮</div>';
-    document.body.appendChild(mask);
+    bar = document.createElement("div");
+    bar.id = "rpyHint";
+    bar.innerHTML =
+      '<span class="txt">手机横过来玩，画面更大</span>' +
+      '<button class="go" type="button">全屏横屏</button>' +
+      '<button class="x" type="button" aria-label="关闭">×</button>';
+    document.body.appendChild(bar);
 
-    document.getElementById("rpyRotateBtn").addEventListener("click", function () {
+    bar.querySelector(".go").addEventListener("click", function () {
       var el = document.documentElement;
-      var req = el.requestFullscreen || el.webkitRequestFullscreen;
-      var done = false;
-      function lock() {
-        if (!done && screen.orientation && screen.orientation.lock) {
-          done = true;
-          try {
-            screen.orientation.lock("landscape").catch(function () {});
-          } catch (e) {}
+      var req = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+      var locked = false;
+      function after() {
+        if (!locked && screen.orientation && screen.orientation.lock) {
+          locked = true;
+          try { screen.orientation.lock("landscape").catch(function () {}); } catch (e) {}
         }
-        setTimeout(update, 350);
+        setTimeout(update, 400);
       }
       if (req) {
         try {
           var p = req.call(el);
-          if (p && p.then) p.then(lock).catch(lock);
-          else lock();
-        } catch (e) {
-          lock();
-        }
-      } else {
-        lock();
-      }
+          if (p && p.then) p.then(after).catch(after);
+          else after();
+        } catch (e) { after(); }
+      } else { after(); }
+    });
+
+    bar.querySelector(".x").addEventListener("click", function () {
+      try { localStorage.setItem(DISMISS_KEY, String(Date.now())); } catch (e) {}
+      bar.classList.remove("show");
     });
   }
 
   function update() {
-    if (!mask) return;
-    if (forceShow) { mask.classList.add("show"); return; }
-    if (!isPhone()) {
-      mask.classList.remove("show");
-      return;
+    if (!bar) return;
+    var show;
+    if (forceShow) show = true;
+    else show = isPhone() && isPortrait() && !dismissedRecently();
+    if (show) {
+      bar.classList.add("show");
+      if (hideTimer) clearTimeout(hideTimer);
+      hideTimer = setTimeout(function () { bar.classList.remove("show"); }, 12000);
+    } else {
+      bar.classList.remove("show");
     }
-    if (isPortrait()) mask.classList.add("show");
-    else mask.classList.remove("show");
   }
 
   function start() {
     build();
     update();
     window.addEventListener("resize", update);
-    window.addEventListener("orientationchange", function () {
-      setTimeout(update, 250);
-    });
+    window.addEventListener("orientationchange", function () { setTimeout(update, 250); });
     if (screen.orientation && screen.orientation.addEventListener) {
-      screen.orientation.addEventListener("change", function () {
-        setTimeout(update, 250);
-      });
+      screen.orientation.addEventListener("change", function () { setTimeout(update, 250); });
     }
+    document.addEventListener("fullscreenchange", function () { setTimeout(update, 300); });
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", start);
-  } else {
-    start();
-  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
 })();
