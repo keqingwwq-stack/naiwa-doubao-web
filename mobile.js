@@ -1,13 +1,15 @@
 /* 手机端强制横屏 v5
    - 优先：全屏 + screen.orientation.lock('landscape')（安卓 Chrome 等）
    - 不支持时：CSS 旋转画布 90°，并把触摸/鼠标坐标重映射后转发给画布
-   - 右下角常驻「横屏 / 还原」按钮，点两次可来回切换 */
+   - 右下角常驻「横屏 / 还原」按钮，点两次可来回切换
+   - 测试钩子：?rotate=1 强制显示按钮；?forceRotate=1 在横屏视口下也强制旋转 */
 (function () {
   "use strict";
 
   var forceShow = /[?&]rotate=1/.test(location.search);
-  var rotated = false;   // 当前是否处于 CSS 旋转兜底模式
-  var locked = false;    // 当前是否成功锁了系统方向
+  var forceRotate = /[?&]forceRotate=1/.test(location.search);
+  var rotated = false;   // 是否处于 CSS 旋转兜底模式
+  var locked = false;    // 是否成功锁了系统方向
   var busy = false;
 
   function isPhone() {
@@ -94,11 +96,11 @@
 
   /* ---------- CSS 旋转兜底：输入重映射 ---------- */
 
+  // 画布 CSS 盒为 (100vh, 100vw)，绕中心顺时针旋转 90°，铺满 (W,H) 视口：
+  // 视觉点 (x,y) 对应的画布内坐标是 (H - y, x)
   function mapPoint(x, y) {
-    var W = window.innerWidth, H = window.innerHeight;
-    // 画布 CSS 尺寸为 (H, W)，绕中心顺时针旋转 90°：
-    // 视觉点 (x,y) 对应画布内坐标 (H - y, x)
-    return { cx: H - y, cy: x, W: W, H: H };
+    var H = window.innerHeight;
+    return { cx: H - y, cy: x };
   }
 
   function remapTouchList(list, c, rect) {
@@ -130,10 +132,16 @@
     return out;
   }
 
+  function isOwnUi(target) {
+    if (!target) return false;
+    if (target === btn || target === hint || target === toastEl) return true;
+    return !!(btn && btn.contains && btn.contains(target));
+  }
+
   function makeTouchHandler(type) {
     return function (ev) {
       if (!rotated) return;
-      if (btn && (ev.target === btn || (btn.contains && btn.contains(ev.target)))) return;
+      if (isOwnUi(ev.target)) return;
       var c = canvasEl();
       if (!c) return;
       ev.preventDefault();
@@ -158,7 +166,7 @@
   function makeMouseHandler(type) {
     return function (ev) {
       if (!rotated) return;
-      if (btn && (ev.target === btn || (btn.contains && btn.contains(ev.target)))) return;
+      if (isOwnUi(ev.target)) return;
       var c = canvasEl();
       if (!c) return;
       ev.preventDefault();
@@ -210,33 +218,35 @@
 
   function tryLock() {
     if (!(screen.orientation && screen.orientation.lock)) return Promise.reject(new Error("no-lock-api"));
-    return screen.orientation.lock("landscape");
+    try {
+      return Promise.resolve(screen.orientation.lock("landscape"));
+    } catch (e) {
+      return Promise.reject(e);
+    }
   }
 
   function enterLandscape() {
     if (busy) return;
     busy = true;
-    var el = document.documentElement;
-    var afterLockFail = function () {
-      // 系统不允许锁方向：若手机本身已经是横屏就什么都不用做，否则用 CSS 旋转兜底
-      if (!isPortrait()) {
-        locked = false;
-        busy = false;
+
+    function fallback() {
+      locked = false;
+      busy = false;
+      if (!isPortrait() && !forceRotate) {
         toast("已经是横屏了", 2000);
         return;
       }
       enableCssRotate();
-      locked = false;
-      busy = false;
-      toast("已用旋转模式横屏显示（部分浏览器不支持真正锁屏）。点「还原」可退出", 5000);
-    };
+      toast("已用旋转模式横屏显示（部分浏览器不支持锁屏）。点「还原」可退出", 5000);
+    }
 
+    var el = document.documentElement;
     if (!fsElement()) {
       var req = el.requestFullscreen || el.webkitRequestFullscreen;
       if (req) {
         try {
           var p = req.call(el);
-          if (p && p.then) { p.then(function () {}).catch(function () {}); }
+          if (p && p.catch) p.catch(function () {});
         } catch (e) {}
       }
     }
@@ -248,14 +258,7 @@
       busy = false;
       toast("已横屏", 2500);
       setTimeout(nudgeResize, 400);
-    }).catch(function (err) {
-      var name = (err && (err.name || err.message)) || "unknown";
-      if (name === "NotSupportedError" || name === "no-lock-api" || name === "NotAllowedError") {
-        afterLockFail();
-      } else {
-        afterLockFail();
-      }
-    });
+    }).catch(fallback);
   }
 
   function exitLandscape() {
@@ -298,7 +301,7 @@
       if (forceShow || isPhone()) btn.classList.add("show");
       else btn.classList.remove("show");
       // 手机自己转成横屏后，不再需要 CSS 旋转兜底
-      if (rotated && !isPortrait() && !busy) disableCssRotate();
+      if (rotated && !isPortrait() && !busy && !forceRotate) disableCssRotate();
       if ((forceShow || isPhone()) && isPortrait() && !hintShown) {
         hintShown = true;
         hint.classList.add("show");
