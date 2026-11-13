@@ -1,15 +1,13 @@
-/* 手机端强制横屏 v5
-   - 优先：全屏 + screen.orientation.lock('landscape')（安卓 Chrome 等）
-   - 不支持时：CSS 旋转画布 90°，并把触摸/鼠标坐标重映射后转发给画布
-   - 右下角常驻「横屏 / 还原」按钮，点两次可来回切换
-   - 测试钩子：?rotate=1 强制显示按钮；?forceRotate=1 在横屏视口下也强制旋转 */
+/* 手机端显示适配 v6
+   - 右下角「横屏」：全屏 + 尝试锁定横屏方向；浏览器拒绝时给出可行指引（不假装修好）
+   - 「装到桌面」：支持 beforeinstallprompt 的浏览器一键安装；装上后按 manifest 的
+     orientation: landscape-primary 启动，由系统保证横屏
+   - 测试钩子：?rotate=1 强制显示按钮 */
 (function () {
   "use strict";
 
   var forceShow = /[?&]rotate=1/.test(location.search);
-  var forceRotate = /[?&]forceRotate=1/.test(location.search);
-  var rotated = false;   // 是否处于 CSS 旋转兜底模式
-  var locked = false;    // 是否成功锁了系统方向
+  var locked = false;
   var busy = false;
 
   function isPhone() {
@@ -29,8 +27,14 @@
         if (window.matchMedia("(orientation: landscape)").matches) return false;
       }
     } catch (e) {}
-    var w = window.innerWidth || 0, h = window.innerHeight || 0;
-    return h >= w;
+    return (window.innerHeight || 0) >= (window.innerWidth || 0);
+  }
+
+  function isStandalone() {
+    try {
+      if (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) return true;
+    } catch (e) {}
+    return !!(navigator.standalone);
   }
 
   function fsElement() {
@@ -41,39 +45,34 @@
     try { window.dispatchEvent(new Event("resize")); } catch (e) {}
   }
 
-  function canvasEl() { return document.getElementById("canvas"); }
-
-  var btn = null, hint = null, toastEl = null, hintShown = false, toastTimer = null;
+  var btnFs = null, btnInstall = null, hint = null, toastEl = null;
+  var hintShown = false, toastTimer = null, deferredPrompt = null;
 
   function injectStyle() {
     var s = document.createElement("style");
     s.textContent =
-      "#rpyFs{position:fixed;right:calc(10px + env(safe-area-inset-right,0px));" +
-      "bottom:calc(10px + env(safe-area-inset-bottom,0px));z-index:2147483000;display:none;" +
-      "align-items:center;justify-content:center;min-width:52px;height:40px;padding:0 12px;border-radius:10px;" +
-      "box-sizing:border-box;background:rgba(12,16,22,.66);border:1px solid rgba(217,180,94,.6);color:#d9b45e;" +
-      "font-family:'Microsoft YaHei UI','PingFang SC',sans-serif;font-size:12px;line-height:1;letter-spacing:.5px;" +
+      ".rpyBtn{position:fixed;right:calc(10px + env(safe-area-inset-right,0px));z-index:2147483000;" +
+      "display:none;align-items:center;justify-content:center;min-width:52px;height:38px;padding:0 12px;" +
+      "border-radius:10px;box-sizing:border-box;background:rgba(12,16,22,.66);" +
+      "border:1px solid rgba(217,180,94,.6);color:#d9b45e;" +
+      "font-family:'Microsoft YaHei UI','PingFang SC',sans-serif;font-size:12px;line-height:1;" +
       "-webkit-user-select:none;user-select:none;touch-action:manipulation;box-shadow:0 4px 14px rgba(0,0,0,.4)}" +
-      "#rpyFs.show{display:flex}" +
-      "#rpyFs:active{background:rgba(217,180,94,.3)}" +
-      "#rpyHint{position:fixed;left:50%;bottom:calc(60px + env(safe-area-inset-bottom,0px));" +
+      ".rpyBtn.show{display:flex}" +
+      ".rpyBtn:active{background:rgba(217,180,94,.3)}" +
+      "#rpyFs{bottom:calc(10px + env(safe-area-inset-bottom,0px))}" +
+      "#rpyInstall{bottom:calc(56px + env(safe-area-inset-bottom,0px));border-color:rgba(120,200,255,.55);color:#8fd0ff}" +
+      "#rpyHint{position:fixed;left:50%;bottom:calc(102px + env(safe-area-inset-bottom,0px));" +
       "transform:translateX(-50%);z-index:2147483000;display:none;max-width:calc(100vw - 28px);" +
       "padding:8px 14px;border-radius:999px;box-sizing:border-box;background:rgba(12,16,22,.9);" +
       "border:1px solid rgba(217,180,94,.5);color:#e8e2d4;font-size:13px;white-space:nowrap;" +
       "font-family:'Microsoft YaHei UI','PingFang SC',sans-serif;pointer-events:none;opacity:0;transition:opacity .4s}" +
       "#rpyHint.show{display:block;opacity:1}" +
-      "#rpyToast{position:fixed;left:50%;top:12%;transform:translateX(-50%);z-index:2147483001;display:none;" +
-      "max-width:calc(100vw - 40px);padding:10px 16px;border-radius:10px;box-sizing:border-box;" +
-      "background:rgba(20,26,34,.96);border:1px solid rgba(255,255,255,.18);color:#f2efe6;font-size:13px;" +
-      "line-height:1.5;text-align:center;font-family:'Microsoft YaHei UI','PingFang SC',sans-serif;" +
-      "box-shadow:0 8px 26px rgba(0,0,0,.5);pointer-events:none}" +
-      "#rpyToast.show{display:block}" +
-      "html.rpy-rot,html.rpy-rot body{overflow:hidden!important;height:100%!important;background:#000!important}" +
-      "html.rpy-rot #presplash{display:none!important}" +
-      "html.rpy-rot #canvas{position:fixed!important;left:50%!important;top:50%!important;" +
-      "width:100vh!important;height:100vw!important;max-width:none!important;max-height:none!important;" +
-      "transform:translate(-50%,-50%) rotate(90deg)!important;transform-origin:center center!important;" +
-      "margin:0!important;z-index:1}";
+      "#rpyToast{position:fixed;left:50%;top:14%;transform:translateX(-50%);z-index:2147483001;display:none;" +
+      "max-width:calc(100vw - 40px);padding:12px 16px;border-radius:10px;box-sizing:border-box;" +
+      "background:rgba(20,26,34,.97);border:1px solid rgba(255,255,255,.18);color:#f2efe6;font-size:13px;" +
+      "line-height:1.6;text-align:left;font-family:'Microsoft YaHei UI','PingFang SC',sans-serif;" +
+      "box-shadow:0 8px 26px rgba(0,0,0,.5);pointer-events:none;white-space:pre-line}" +
+      "#rpyToast.show{display:block}";
     document.head.appendChild(s);
   }
 
@@ -86,138 +85,18 @@
     toastEl.textContent = msg;
     toastEl.classList.add("show");
     if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { toastEl.classList.remove("show"); }, ms || 4000);
+    toastTimer = setTimeout(function () { toastEl.classList.remove("show"); }, ms || 7000);
   }
 
-  function setBtn() {
-    if (!btn) return;
-    btn.textContent = (rotated || locked) ? "还原" : "横屏";
+  function setFsLabel() {
+    if (!btnFs) return;
+    btnFs.textContent = locked ? "还原" : "横屏";
   }
-
-  /* ---------- CSS 旋转兜底：输入重映射 ---------- */
-
-  // 画布 CSS 盒为 (100vh, 100vw)，绕中心顺时针旋转 90°，铺满 (W,H) 视口：
-  // 视觉点 (x,y) 对应的画布内坐标是 (H - y, x)
-  function mapPoint(x, y) {
-    var H = window.innerHeight;
-    return { cx: H - y, cy: x };
-  }
-
-  function remapTouchList(list, c, rect) {
-    var out = [];
-    for (var i = 0; i < list.length; i++) {
-      var t = list[i];
-      var p = mapPoint(t.clientX, t.clientY);
-      var clientX = rect.left + p.cx * (rect.width / c.width);
-      var clientY = rect.top + p.cy * (rect.height / c.height);
-      try {
-        out.push(new Touch({
-          identifier: t.identifier,
-          target: c,
-          clientX: clientX,
-          clientY: clientY,
-          pageX: clientX + window.scrollX,
-          pageY: clientY + window.scrollY,
-          screenX: t.screenX,
-          screenY: t.screenY,
-          radiusX: t.radiusX || 1,
-          radiusY: t.radiusY || 1,
-          rotationAngle: 0,
-          force: t.force || 1
-        }));
-      } catch (e) {
-        return null;
-      }
-    }
-    return out;
-  }
-
-  function isOwnUi(target) {
-    if (!target) return false;
-    if (target === btn || target === hint || target === toastEl) return true;
-    return !!(btn && btn.contains && btn.contains(target));
-  }
-
-  function makeTouchHandler(type) {
-    return function (ev) {
-      if (!rotated) return;
-      if (isOwnUi(ev.target)) return;
-      var c = canvasEl();
-      if (!c) return;
-      ev.preventDefault();
-      ev.stopPropagation();
-      var rect = c.getBoundingClientRect();
-      var touches = remapTouchList(ev.touches || [], c, rect);
-      var changed = remapTouchList(ev.changedTouches || [], c, rect);
-      if (!touches || !changed) return;
-      var synth;
-      try {
-        synth = new TouchEvent(type, {
-          bubbles: true, cancelable: true,
-          touches: touches, targetTouches: touches, changedTouches: changed
-        });
-      } catch (e) {
-        return;
-      }
-      c.dispatchEvent(synth);
-    };
-  }
-
-  function makeMouseHandler(type) {
-    return function (ev) {
-      if (!rotated) return;
-      if (isOwnUi(ev.target)) return;
-      var c = canvasEl();
-      if (!c) return;
-      ev.preventDefault();
-      ev.stopPropagation();
-      var rect = c.getBoundingClientRect();
-      var p = mapPoint(ev.clientX, ev.clientY);
-      var clientX = rect.left + p.cx * (rect.width / c.width);
-      var clientY = rect.top + p.cy * (rect.height / c.height);
-      var synth = new MouseEvent(type, {
-        bubbles: true, cancelable: true,
-        clientX: clientX, clientY: clientY,
-        screenX: ev.screenX, screenY: ev.screenY,
-        button: ev.button, buttons: ev.buttons
-      });
-      c.dispatchEvent(synth);
-    };
-  }
-
-  var touchTypes = ["touchstart", "touchmove", "touchend", "touchcancel"];
-  var mouseTypes = ["mousedown", "mousemove", "mouseup"];
-
-  function bindRemap(on) {
-    var method = on ? "addEventListener" : "removeEventListener";
-    touchTypes.forEach(function (t) {
-      window[method](t, makeTouchHandler(t), { capture: true, passive: false });
-    });
-    mouseTypes.forEach(function (t) {
-      window[method](t, makeMouseHandler(t), true);
-    });
-  }
-
-  function enableCssRotate() {
-    document.documentElement.classList.add("rpy-rot");
-    rotated = true;
-    bindRemap(true);
-    setBtn();
-    setTimeout(nudgeResize, 300);
-  }
-
-  function disableCssRotate() {
-    document.documentElement.classList.remove("rpy-rot");
-    if (rotated) bindRemap(false);
-    rotated = false;
-    setBtn();
-    setTimeout(nudgeResize, 300);
-  }
-
-  /* ---------- 主流程 ---------- */
 
   function tryLock() {
-    if (!(screen.orientation && screen.orientation.lock)) return Promise.reject(new Error("no-lock-api"));
+    if (!(screen.orientation && screen.orientation.lock)) {
+      return Promise.reject(new Error("no-lock-api"));
+    }
     try {
       return Promise.resolve(screen.orientation.lock("landscape"));
     } catch (e) {
@@ -225,20 +104,22 @@
     }
   }
 
+  function guidance() {
+    var ios = /iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+    if (ios) {
+      return "这个浏览器不能由网页强制横屏。\n\n" +
+        "办法一：打开「控制中心」关掉竖屏锁定，把手机横过来。\n" +
+        "办法二：用 Safari 打开本页，点「分享」→「添加到主屏幕」，图标启动时会自动横屏。";
+    }
+    return "这个浏览器不能由网页强制横屏。\n\n" +
+      "办法一：下拉通知栏，打开「自动旋转」，再把手机横过来。\n" +
+      "办法二：点右下角「装到桌面」，装成 App 后启动会自动横屏。\n" +
+      "办法三：换 Chrome / Edge / 夸克 打开本页，再点「横屏」。";
+  }
+
   function enterLandscape() {
     if (busy) return;
     busy = true;
-
-    function fallback() {
-      locked = false;
-      busy = false;
-      if (!isPortrait() && !forceRotate) {
-        toast("已经是横屏了", 2000);
-        return;
-      }
-      enableCssRotate();
-      toast("已用旋转模式横屏显示（部分浏览器不支持锁屏）。点「还原」可退出", 5000);
-    }
 
     var el = document.documentElement;
     if (!fsElement()) {
@@ -253,12 +134,16 @@
 
     tryLock().then(function () {
       locked = true;
-      rotated = false;
-      setBtn();
+      setFsLabel();
       busy = false;
-      toast("已横屏", 2500);
+      toast("已横屏", 2000);
       setTimeout(nudgeResize, 400);
-    }).catch(fallback);
+    }).catch(function () {
+      locked = false;
+      busy = false;
+      setFsLabel();
+      toast(guidance(), 11000);
+    });
   }
 
   function exitLandscape() {
@@ -266,46 +151,85 @@
     busy = true;
     try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (e) {}
     locked = false;
-    disableCssRotate();
+    setFsLabel();
     if (fsElement()) {
       var ex = document.exitFullscreen || document.webkitExitFullscreen;
       if (ex) { try { ex.call(document); } catch (e) {} }
     }
     setTimeout(function () { busy = false; nudgeResize(); }, 400);
-    toast("已还原", 1800);
+    toast("已还原", 1500);
   }
 
   function build() {
     injectStyle();
 
-    btn = document.createElement("button");
-    btn.id = "rpyFs";
-    btn.type = "button";
-    btn.setAttribute("aria-label", "横屏");
-    btn.textContent = "横屏";
-    document.body.appendChild(btn);
+    btnFs = document.createElement("button");
+    btnFs.id = "rpyFs";
+    btnFs.type = "button";
+    btnFs.className = "rpyBtn";
+    btnFs.textContent = "横屏";
+    document.body.appendChild(btnFs);
+
+    btnInstall = document.createElement("button");
+    btnInstall.id = "rpyInstall";
+    btnInstall.type = "button";
+    btnInstall.className = "rpyBtn";
+    btnInstall.textContent = "装到桌面";
+    document.body.appendChild(btnInstall);
 
     hint = document.createElement("div");
     hint.id = "rpyHint";
-    hint.textContent = "点右下角「横屏」可以强制横屏";
+    hint.textContent = "点右下角「横屏」或「装到桌面」";
     document.body.appendChild(hint);
 
-    btn.addEventListener("click", function (e) {
+    btnFs.addEventListener("click", function (e) {
       e.preventDefault();
       e.stopPropagation();
-      if (rotated || locked) exitLandscape();
+      if (locked) exitLandscape();
       else enterLandscape();
     });
 
+    btnInstall.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (deferredPrompt) {
+        var p = deferredPrompt;
+        deferredPrompt = null;
+        btnInstall.classList.remove("show");
+        try { p.prompt(); } catch (err) {}
+        return;
+      }
+      var ios = /iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+      toast(ios
+        ? "在 Safari 里点「分享」按钮，选「添加到主屏幕」，之后从图标启动会自动横屏。"
+        : "在这个浏览器里没法一键安装。可以用 Chrome 打开本页，菜单里选「安装应用 / 添加到主屏幕」。", 9000);
+    });
+
+    window.addEventListener("beforeinstallprompt", function (e) {
+      e.preventDefault();
+      deferredPrompt = e;
+      if (isPhone()) btnInstall.classList.add("show");
+    });
+
+    window.addEventListener("appinstalled", function () {
+      deferredPrompt = null;
+      btnInstall.classList.remove("show");
+      toast("已安装到桌面，之后从图标启动会自动横屏", 5000);
+    });
+
     function layout() {
-      if (forceShow || isPhone()) btn.classList.add("show");
-      else btn.classList.remove("show");
-      // 手机自己转成横屏后，不再需要 CSS 旋转兜底
-      if (rotated && !isPortrait() && !busy && !forceRotate) disableCssRotate();
-      if ((forceShow || isPhone()) && isPortrait() && !hintShown) {
+      var show = forceShow || (isPhone() && !isStandalone());
+      if (show) btnFs.classList.add("show");
+      else btnFs.classList.remove("show");
+      if (deferredPrompt && show) btnInstall.classList.add("show");
+
+      if (show && isPortrait() && !hintShown) {
         hintShown = true;
         hint.classList.add("show");
         setTimeout(function () { hint.classList.remove("show"); }, 6000);
+      }
+      if (!isPortrait() || isStandalone()) {
+        hint.classList.remove("show");
       }
     }
 
